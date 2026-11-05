@@ -1,13 +1,14 @@
-import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT } from './core.js';
+import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate } from './core.js';
 import { request, profiles } from './api.js';
 import { scanLore } from './lore.js';
 import { cardMeaning } from './meanings.js';
 import { icon } from './icons.js';
+import { attachFloating } from './floating.js';
 
 const ctx = () => globalThis.SillyTavern.getContext();
-const defaults = { enabled: true, profileId: '', reversed: true, interval: 1, contextChars: 14000 };
+const defaults = { enabled: true, profileId: '', reversed: true, interval: 1, contextChars: 14000, floatingPosition: null };
 let config, connected = false, busy = false, controller, epoch = 0, timer, generation = false;
-let modal, panel, grid, notice, detail, selected = null, lastFocus, pendingCheck = false;
+let modal, panel, grid, notice, detail, floating, selected = null, lastFocus, pendingCheck = false;
 const celebrating = new Set(), art = new Map();
 let readingId = null, revealed = null;
 const label = { pending: 'Ждёт трактовки', waiting: 'Ожидает выбора', active: 'Действует', conflict: 'Требует внимания', complete: 'Исполнено' };
@@ -36,6 +37,7 @@ function setEnabled() {
 }
 function say(text, error = false) { notice.textContent = text; notice.classList.toggle('tf-error', error); }
 function render() {
+    if (floating) floating.hidden = !config.enabled;
     const toggle = panel.querySelector('[data-enabled]');
     toggle.textContent = config.enabled ? 'Таро включено' : 'Таро выключено';
     toggle.setAttribute('aria-pressed', String(config.enabled));
@@ -147,18 +149,23 @@ async function readCard(id) {
     const currentEpoch = epoch, key = chatKey(); controller = new AbortController(); busy = true; readingId = id; render(); say('Читаем судьбу…');
     try {
         const c = ctx(), character = c.characters?.[c.characterId];
+        if (!card.fateDraft) {
+            const draft = await request(c,config,FATE_PROMPT,fateInput(card),controller.signal,800,{temperature:0.8});
+            if (epoch !== currentEpoch || chatKey() !== key) return;
+            card.fateDraft=validateFate(parseJSON(draft));save();
+        }
         const summary = [...c.chat].reverse().find(m => m.extra?.memory)?.extra.memory;
         const worldLore = await scanLore(c, contextWindow(c.chat), card.question);
         if (epoch !== currentEpoch || chatKey() !== key) return;
         const result = await request(c, config, DRAW_PROMPT, {
-            worldLore,
+            worldLore, fate:card.fateDraft,
             card: NAMES[card.arcana], reversed:card.reversed, meaning:cardMeaning(card.arcana, card.reversed), question:card.question,
             characters: { player:c.name1, partner:c.name2, description:String(character?.description || '').slice(0,2500), scenario:String(character?.scenario || '').slice(0,1500) },
             summary: typeof summary === 'string' ? summary.slice(0,2500) : '', messages:contextWindow(c.chat),
             otherPredictions:s.cards.filter(x=>x.reading).map(x=>x.reading),
         }, controller.signal, 1400);
         if (epoch !== currentEpoch || chatKey() !== key) return;
-        card.reading = validateReading(parseJSON(result)); s.cursor = Math.min(s.cursor,card.drawAt); save(); say('Предсказание готово. Нажми на карту, чтобы прочитать.');
+        card.reading = validateReading(parseJSON(result),true); s.cursor = Math.min(s.cursor,card.drawAt); save(); say('Предсказание готово. Нажми на карту, чтобы прочитать.');
     } catch(e) { if (epoch === currentEpoch && e.name !== 'AbortError') say(e.message,true); }
     finally { busy = false; readingId = null; render(); if (pendingCheck) schedule(); }
 }
@@ -195,7 +202,7 @@ async function check(force = false) {
             for (const batch of segments) {
                 const result = await request(ctx(),config,MONITOR_PROMPT,{
                     worldLore,
-                    cards:cards.map(c=>({id:c.id,trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
+                    cards:cards.map(c=>({id:c.id,activation:c.reading.activation || 'choice',trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
                     previous:ctx().chat.slice(Math.max(0,i-2),i).map(m=>({role:m.is_user?'player':'narrator',text:String(m.mes).slice(-1200)})),messages:batch,
                 },controller.signal,2200);
                 if (epoch !== currentEpoch || chatKey() !== key) return;
@@ -322,13 +329,12 @@ function mount() {
     footer.append(settingsButton);panel.append(footer,settings);modal.append(panel);document.body.append(modal);
     modal.addEventListener('close',()=>{closeCard();lastFocus?.focus?.();});
     const opener=el('button','list-group-item flex-container flexGap5 tf-menu-entry');opener.type='button';opener.append(icon('moon'),el('span','','Таро'));opener.addEventListener('click',open);opener.title='Витражи судьбы';(document.querySelector('#extensionsMenu') || document.querySelector('#extensions_settings') || document.body).append(opener);
-    const moon=button('',open,'tf-floating');moon.append(icon('moon'));moon.setAttribute('aria-label','Открыть Таро — Витражи судьбы');moon.title='Открыть Таро';document.body.append(moon);
+    const moon=floating=button('',open,'tf-floating');moon.append(icon('moon'));moon.setAttribute('aria-label','Открыть Таро. Перетащи значок или перемести стрелками клавиатуры.');moon.title='Открыть Таро · перетащи, чтобы переместить';moon.hidden=!config.enabled;document.body.append(moon);
+    const refreshFloating=attachFloating(moon,()=>config.floatingPosition,position=>{config.floatingPosition=position;ctx().saveSettingsDebounced();},()=>window.visualViewport || {width:innerWidth,height:innerHeight});
     function viewport(){
         const v=window.visualViewport;
         modal.style.setProperty('--tf-height',`${v?.height||innerHeight}px`);modal.style.setProperty('--tf-top',`${v?.offsetTop||0}px`);
-        // Anchor to the visible viewport, including the mobile keyboard and zoom.
-        moon.style.left=`${Math.max(8,(v?.offsetLeft||0)+(v?.width||innerWidth)-72)}px`;
-        moon.style.top=`${Math.max(8,(v?.offsetTop||0)+(v?.height||innerHeight)-156)}px`;
+        refreshFloating();
     }
     window.visualViewport?.addEventListener('resize',viewport);window.visualViewport?.addEventListener('scroll',viewport);window.addEventListener('resize',viewport);viewport();
 }

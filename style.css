@@ -85,6 +85,9 @@
 .tf-menu-entry:focus-visible, .tf-floating:focus-visible { outline: 2px solid #dec393; outline-offset: 4px; }
 body > .tf-floating { position: fixed; right: auto; bottom: auto; z-index: 2147483000; display: grid; place-items: center; visibility: visible; opacity: 1; width: 56px; height: 56px; min-width: 56px; padding: 0; border: 0; border-radius: 50%; color: #e1c68d; background: #521e2c; box-shadow: 0 5px 24px #0008; touch-action: manipulation; }
 body > .tf-floating:hover { background: #692b39; }
+body > .tf-floating { touch-action: none; user-select: none; cursor: grab; }
+body > .tf-floating.tf-dragging { cursor: grabbing; }
+body > .tf-floating[hidden] { display: none !important; }
 .tf-floating > .tf-icon { width: 30px; height: 30px; margin: 0; }
 body:has(.tf-modal[open]) > .tf-floating { visibility: hidden; }
 .tf-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 28px; padding: 0; border: 0; background: transparent; }

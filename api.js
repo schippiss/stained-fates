@@ -7,7 +7,7 @@ export function profiles(context) {
     }).map(({id,name,model}) => ({id,name,model}));
 }
 
-export async function request(context, settings, system, payload, signal, maxTokens = 1800) {
+export async function request(context, settings, system, payload, signal, maxTokens = 1800, {temperature = 0.35} = {}) {
     const service = context.ConnectionManagerRequestService;
     if (!service) throw Error('Обнови SillyTavern: нужен штатный менеджер профилей подключения.');
     if (!profiles(context).some(p => p.id === settings.profileId)) throw Error('Выбери сохранённый профиль Chat Completion в настройках Таро.');
@@ -25,7 +25,7 @@ export async function request(context, settings, system, payload, signal, maxTok
         const result = await Promise.race([cancelled, service.sendRequest(settings.profileId,
             [{role:'system',content:system},{role:'user',content:JSON.stringify(payload)}], maxTokens,
             {stream:false,signal:controller.signal,extractData:true,includePreset:false,includeInstruct:false},
-            {temperature:0.35})]);
+            {temperature})]);
         if (typeof result?.content !== 'string' || !result.content.trim() || result.content.length > 32000) throw Error('invalid response');
         return result.content;
     } catch(e) {
