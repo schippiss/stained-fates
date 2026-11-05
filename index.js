@@ -1,16 +1,24 @@
 import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT } from './core.js';
-import { request, endpoint, nextCredential, checkKeyTransport } from './api.js';
+import { request, profiles } from './api.js';
 import { scanLore } from './lore.js';
+import { cardMeaning } from './meanings.js';
+import { icon } from './icons.js';
 
 const ctx = () => globalThis.SillyTavern.getContext();
-const defaults = { enabled: true, endpoint: '', model: '', reversed: true, interval: 1, contextChars: 14000 };
-let config, secret = '', connected = false, busy = false, controller, epoch = 0, timer, generation = false;
+const defaults = { enabled: true, profileId: '', reversed: true, interval: 1, contextChars: 14000 };
+let config, connected = false, busy = false, controller, epoch = 0, timer, generation = false;
 let modal, panel, grid, notice, detail, selected = null, lastFocus, pendingCheck = false;
 const celebrating = new Set(), art = new Map();
+let readingId = null, revealed = null;
 const label = { pending: 'Ждёт трактовки', waiting: 'Ожидает выбора', active: 'Действует', conflict: 'Требует внимания', complete: 'Исполнено' };
 const asset = id => { id = id === 'back' || (Number.isInteger(id) && id >= 0 && id < 22) ? id : 'back'; return art.get(String(id)) || new URL(`assets/${id === 'back' ? 'back' : String(id).padStart(2,'0')}.webp`, import.meta.url).href; };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
-function button(text, fn, cls = '') { const b = el('button', `tf-button ${cls}`, text); b.type = 'button'; b.addEventListener('click', fn); return b; }
+function button(text, fn, cls = '') {
+    const b = el('button', `tf-button ${cls}`, text); b.type = 'button'; b.addEventListener('click', fn);
+    const glyph = text.startsWith('←') ? 'back' : ({'✕':'close', 'Настройки':'settings', 'Проверить события':'check', 'Повторить трактовку':'cards'})[text];
+    if (glyph) { b.textContent = text.replace(/^←\s*/, '').replace('✕', ''); b.prepend(icon(glyph)); }
+    return b;
+}
 function chatKey() { const c = ctx(); return c.chatId == null ? null : `${c.groupId ?? c.characterId ?? ''}:${c.chatId}`; }
 function state() {
     if (!chatKey()) return null;
@@ -31,6 +39,7 @@ function render() {
     const toggle = panel.querySelector('[data-enabled]');
     toggle.textContent = config.enabled ? 'Таро включено' : 'Таро выключено';
     toggle.setAttribute('aria-pressed', String(config.enabled));
+    connected = profiles(ctx()).some(p => p.id === config.profileId);
     const s = state(); grid.replaceChildren();
     panel.querySelector('[data-question]').disabled = !s || !config.enabled;
     panel.querySelector('[data-draw]').disabled = !config.enabled || !s || s.cards.length >= 3 || busy;
@@ -53,17 +62,43 @@ function open() {
     else if (!chatKey()) say('Открой чат, чтобы обратиться к картам.');
     else if (!connected) say('Подключи модель в настройках, чтобы карты могли читать историю.');
 }
-function openCard(id) { selected = id; detail.hidden = false; grid.hidden = true; panel.querySelector('.tf-compose').hidden = true; renderDetail(); detail.querySelector('button')?.focus(); }
+function openCard(id) { revealed = null; selected = id; detail.hidden = false; grid.hidden = true; panel.querySelector('.tf-compose').hidden = true; renderDetail(); detail.querySelector('button')?.focus(); }
 function closeCard() { selected = null; detail.hidden = true; grid.hidden = false; panel.querySelector('.tf-compose').hidden = false; render(); queueCelebrations(); }
 function renderDetail() {
     const c = state()?.cards.find(c => c.id === selected); if (!c) { closeCard(); return; }
     detail.replaceChildren(); detail.style.setProperty('--tf-back',`url("${asset('back')}")`);
     detail.append(button('← К картам',closeCard,'tf-quiet'));
+    detail.classList.toggle('tf-reading-side', revealed === c.id);
+    if (revealed !== c.id) {
+        const face = button('', () => {
+            if (!c.reading) return;
+            revealed = c.id; renderDetail(); detail.querySelector('h2')?.focus();
+        }, 'tf-reveal');
+        face.disabled = !c.reading;
+        face.setAttribute('aria-label', `${NAMES[c.arcana]}. Нажми, чтобы прочитать предсказание`);
+        const img = el('img'); img.src = asset(c.arcana); img.alt = NAMES[c.arcana];
+        if (c.reversed) img.className = 'tf-reversed';
+        face.append(img);
+        if (c.reading) {
+            const hint = el('span', 'tf-reveal-hint');
+            const finger = el('span', 'tf-finger'); finger.append(icon('hand')); finger.setAttribute('aria-hidden', 'true');
+            hint.append(finger, el('span', '', 'Нажми, чтобы прочитать')); face.append(hint);
+        }
+        detail.append(face, el('p', 'tf-question', c.question));
+        if (readingId === c.id) {
+            const loading = el('p', 'tf-loading', 'Читаем судьбу…'); loading.prepend(icon('sun')); loading.setAttribute('role', 'status'); detail.append(loading);
+        } else if (!c.reading) {
+            detail.append(el('p', 'tf-help', 'Карта уже выбрана. Осталось услышать её предсказание.'));
+            const retry = button('Повторить трактовку', () => readCard(c.id), 'tf-primary');
+            retry.disabled = busy || !config.enabled; detail.append(retry);
+        }
+        return;
+    }
     detail.append(el('div','tf-eyebrow',`${ROMAN[c.arcana]} · ${c.reversed ? 'Перевёрнутая' : 'Прямая'}`),el('h2','',NAMES[c.arcana]),el('span','tf-status',label[status(c)]));
     detail.append(el('p','tf-question',c.question));
+    detail.querySelector('h2').tabIndex = -1;
     if (c.reading) {
         detail.append(el('p','tf-prophecy',c.reading.prediction));
-        if (status(c) === 'waiting') detail.append(el('p','tf-trigger',`Вступит в силу, когда: ${c.reading.trigger}`));
         const list = el('ol','tf-track');
         for (const f of [...c.facts].sort((a,b)=>a.message-b.message || a.step-b.step)) {
             const li = el('li'); li.append(el('span','',f.summary));
@@ -77,7 +112,6 @@ function renderDetail() {
         detail.append(button('Повторить трактовку',()=>readCard(c.id)));
     }
     const actions = el('div','tf-actions');
-    actions.append(button('Проверить события',()=>check(true),'tf-quiet'));
     actions.append(button('Отменить предсказание',()=>{
         actions.replaceChildren(el('span','','Карта исчезнет и перестанет влиять на историю.'));
         actions.append(button('Да, отменить',()=>removeCard(c.id)),button('Оставить',renderDetail,'tf-quiet'));
@@ -110,23 +144,23 @@ async function drawCard() {
 async function readCard(id) {
     if (!config.enabled || busy) return;
     const s = state(), card = s?.cards.find(c => c.id === id); if (!card || card.reading) return;
-    const currentEpoch = epoch, key = chatKey(); controller = new AbortController(); busy = true; render(); say('Карта всматривается в историю…');
+    const currentEpoch = epoch, key = chatKey(); controller = new AbortController(); busy = true; readingId = id; render(); say('Читаем судьбу…');
     try {
         const c = ctx(), character = c.characters?.[c.characterId];
         const summary = [...c.chat].reverse().find(m => m.extra?.memory)?.extra.memory;
         const worldLore = await scanLore(c, contextWindow(c.chat), card.question);
         if (epoch !== currentEpoch || chatKey() !== key) return;
-        const result = await request(c, config, secret, DRAW_PROMPT, {
+        const result = await request(c, config, DRAW_PROMPT, {
             worldLore,
-            card: NAMES[card.arcana], reversed:card.reversed, question:card.question,
+            card: NAMES[card.arcana], reversed:card.reversed, meaning:cardMeaning(card.arcana, card.reversed), question:card.question,
             characters: { player:c.name1, partner:c.name2, description:String(character?.description || '').slice(0,2500), scenario:String(character?.scenario || '').slice(0,1500) },
             summary: typeof summary === 'string' ? summary.slice(0,2500) : '', messages:contextWindow(c.chat),
             otherPredictions:s.cards.filter(x=>x.reading).map(x=>x.reading),
         }, controller.signal, 1400);
         if (epoch !== currentEpoch || chatKey() !== key) return;
-        card.reading = validateReading(parseJSON(result)); s.cursor = Math.min(s.cursor,card.drawAt); save(); say('Предсказание открыто. Оно ждёт твоего выбора.');
+        card.reading = validateReading(parseJSON(result)); s.cursor = Math.min(s.cursor,card.drawAt); save(); say('Предсказание готово. Нажми на карту, чтобы прочитать.');
     } catch(e) { if (epoch === currentEpoch && e.name !== 'AbortError') say(e.message,true); }
-    finally { busy = false; render(); if (pendingCheck) schedule(); }
+    finally { busy = false; readingId = null; render(); if (pendingCheck) schedule(); }
 }
 function schedule() { if (!config.enabled) return; pendingCheck = true; clearTimeout(timer); timer = setTimeout(()=>{ if (!generation) check(); },650); }
 async function check(force = false) {
@@ -159,7 +193,7 @@ async function check(force = false) {
             const segments = messages.length === 1 && messages[0].text.length > config.contextChars
                 ? Array.from({length:Math.ceil(messages[0].text.length/(config.contextChars-400))},(_,j)=>[{...messages[0],text:messages[0].text.slice(j*(config.contextChars-400),j*(config.contextChars-400)+config.contextChars),partial:true}]) : [messages];
             for (const batch of segments) {
-                const result = await request(ctx(),config,secret,MONITOR_PROMPT,{
+                const result = await request(ctx(),config,MONITOR_PROMPT,{
                     worldLore,
                     cards:cards.map(c=>({id:c.id,trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
                     previous:ctx().chat.slice(Math.max(0,i-2),i).map(m=>({role:m.is_user?'player':'narrator',text:String(m.mes).slice(-1200)})),messages:batch,
@@ -203,30 +237,34 @@ function field(form, title, type, value, name) {
 function settingsUI() {
     const d=el('details','tf-settings'); d.append(el('summary','','Настройки'));
     const form=el('form');
-    const url=field(form,'Адрес API (включая /v1, если требуется)','url',config.endpoint,'endpoint'); url.placeholder='https://example.com/v1';
-    const model=field(form,'Модель','text',config.model,'model'); model.placeholder='Название модели у провайдера';
-    const key=field(form,'API-ключ · до перезагрузки страницы','password','','key'); key.autocomplete='off';
-    form.append(el('p','tf-help','Ключ хранится только в памяти этой страницы. После перезагрузки введи его снова. Чат и подходящие записи подключённых лорбуков отправляются выбранному API через сервер SillyTavern.'));
-    const rev=field(form,'Разрешить перевёрнутые карты','checkbox',config.reversed,'reversed');
-    const interval=field(form,'Проверка каждые N ответов (1 — сразу)','number',config.interval,'interval'); interval.min='1';interval.max='10';
-    const budget=field(form,'Объём чата за запрос, символов','number',config.contextChars,'budget'); budget.min='4000';budget.max='32000';budget.step='1000';
-    function capture() {
-        const next={endpoint:endpoint(url.value),model:model.value.trim(),reversed:rev.checked,interval:Math.min(10,Math.max(1,Number(interval.value)||1)),contextChars:Math.min(32000,Math.max(4000,Number(budget.value)||14000))};
-        if(!next.model)throw Error('Укажи название модели.');
-        const newSecret=nextCredential(config.endpoint,next.endpoint,secret,key.value);
-        checkKeyTransport(newSecret);
-        invalidate(); Object.assign(config,next); secret=newSecret; key.value='';
-        connected=true; ctx().saveSettingsDebounced();
+    const wrap=el('label','tf-field');wrap.append(el('span','','Профиль подключения SillyTavern'));
+    const select=el('select');select.name='profileId';wrap.append(select);form.append(wrap);
+    const help=el('p','tf-help','Подключи модель и сохрани профиль в разделе API-подключений SillyTavern, затем выбери его здесь. Ключ хранит Таверна; повторно вводить его в Таро не нужно.');form.append(help);
+    function refreshProfiles() {
+        const selected=select.value || config.profileId;
+        select.replaceChildren();const placeholder=el('option','','Выбери профиль');placeholder.value='';select.append(placeholder);
+        for(const p of profiles(ctx())){const option=el('option','',p.name || p.model);option.value=p.id;select.append(option);}
+        select.value=profiles(ctx()).some(p=>p.id===selected)?selected:'';
+        connected=profiles(ctx()).some(p=>p.id===config.profileId);
     }
-    const submit=el('button','tf-button','Сохранить подключение');submit.type='submit';form.append(submit);
-    form.addEventListener('submit',e=>{e.preventDefault();try{capture();say('Подключение сохранено.');schedule();}catch(err){say(err.message,true);}});
-    form.append(button('Проверить API',async()=>{
-        if(!config.enabled){say('Включи Таро перед проверкой подключения.');return;}
-        if(busy)return;
-        try {capture();busy=true;say('Проверяем подключение…');await request(ctx(),config,secret,'Ответь одним словом: готово.',{},undefined,24);say('API отвечает. Можно обратиться к картам.');}
+    refreshProfiles();select.addEventListener('focus',refreshProfiles);
+    form.append(button('Обновить список профилей',()=>{refreshProfiles();render();},'tf-quiet'));
+    const rev=field(form,'Разрешить перевёрнутые карты','checkbox',config.reversed,'reversed');
+    const interval=field(form,'Проверка каждые N ответов (1 — сразу)','number',config.interval,'interval');interval.min='1';interval.max='10';
+    const budget=field(form,'Объём чата за запрос, символов','number',config.contextChars,'budget');budget.min='4000';budget.max='32000';budget.step='1000';
+    function capture(){
+        if(!profiles(ctx()).some(p=>p.id===select.value))throw Error('Сначала создай профиль Chat Completion в SillyTavern и выбери его здесь.');
+        invalidate();config.profileId=select.value;config.reversed=rev.checked;
+        config.interval=Math.min(10,Math.max(1,Number(interval.value)||1));config.contextChars=Math.min(32000,Math.max(4000,Number(budget.value)||14000));
+        connected=true;ctx().saveSettingsDebounced();render();
+    }
+    const submit=el('button','tf-button tf-primary','Сохранить настройки');submit.type='submit';form.append(submit);
+    form.addEventListener('submit',e=>{e.preventDefault();if(busy)return;try{capture();say('Профиль Таро сохранён.');schedule();}catch(e){say(e.message,true);}});
+    form.append(button('Проверить подключение',async()=>{
+        if(busy)return;if(!config.enabled){say('Включи Таро перед проверкой.');return;}
+        try{capture();busy=true;render();say('Проверяем подключение…');await request(ctx(),config,'Ответь одним словом: готово.',{},undefined,24);say('Подключение работает. Можно обратиться к картам.');}
         catch(e){say(e.message,true);}finally{busy=false;render();}
     },'tf-quiet'));
-    form.append(button('Отключить и забыть ключ',()=>{invalidate();secret='';key.value='';connected=false;clearTimeout(timer);say('Ключ удалён из памяти. Наблюдение отключено.');},'tf-quiet'));
     form.append(el('p','tf-help','Проверки расходуют токены. Интервал больше 1 уменьшает частоту, но задерживает отметки. На каждом ходе рассказчик получает краткие условия карт.'));
     d.append(form);
     const upload=el('label','tf-field'); upload.append(el('span','','Свои изображения · выбрать одно или несколько'));
@@ -273,25 +311,33 @@ function mount() {
     const toolbar=el('div','tf-toolbar'),toggle=button('',setEnabled,'tf-toggle');toggle.dataset.enabled='';
     toolbar.append(toggle,el('span','tf-help','Свой расклад в каждом чате'));panel.append(toolbar);
     grid=el('div','tf-grid');panel.append(grid);detail=el('article','tf-detail');detail.hidden=true;panel.append(detail);
-    const compose=el('form','tf-compose');const question=el('textarea');question.dataset.question='';question.placeholder='К чему приведёт мой выбор?';question.maxLength=600;question.rows=2;question.setAttribute('aria-label','Вопрос картам');question.addEventListener('input',()=>{const s=state();if(s){s.draft=question.value;save();}});compose.append(question);
-    const drawButton=el('button','tf-button tf-primary','Вытянуть карту');drawButton.type='submit';drawButton.dataset.draw='';compose.append(drawButton);compose.addEventListener('submit',e=>{e.preventDefault();drawCard().catch(e=>say(e.message,true));});panel.append(compose);
+    const compose=el('form','tf-compose');const question=el('textarea');question.dataset.question='';question.id='tf-question';const questionLabel=el('label','tf-compose-label','Твой вопрос картам');questionLabel.htmlFor=question.id;compose.append(questionLabel);question.placeholder='К чему приведёт мой выбор?';question.maxLength=600;question.rows=2;question.addEventListener('input',()=>{const s=state();if(s){s.draft=question.value;save();}});compose.append(question);
+    const drawButton=el('button','tf-button tf-primary','Вытянуть карту');drawButton.prepend(icon('cards'));drawButton.type='submit';drawButton.dataset.draw='';compose.append(drawButton);compose.addEventListener('submit',e=>{e.preventDefault();drawCard().catch(e=>say(e.message,true));});panel.append(compose);
     notice=el('p','tf-notice');notice.setAttribute('role','status');notice.setAttribute('aria-live','polite');panel.append(notice);
     const footer=el('div','tf-footer');footer.append(button('Проверить события',()=>check(true),'tf-quiet'));
     const settings=settingsUI();
     const settingsButton=button('Настройки',()=>{settings.open=!settings.open;},'tf-quiet');
     settingsButton.setAttribute('aria-expanded','false');
-    settings.addEventListener('toggle',()=>{panel.classList.toggle('tf-show-settings',settings.open);settingsButton.textContent=settings.open?'← К раскладу':'Настройки';settingsButton.setAttribute('aria-expanded',String(settings.open));});
+    settings.addEventListener('toggle',()=>{panel.classList.toggle('tf-show-settings',settings.open);settingsButton.replaceChildren(icon(settings.open?'back':'settings'),document.createTextNode(settings.open?'К раскладу':'Настройки'));settingsButton.setAttribute('aria-expanded',String(settings.open));});
     footer.append(settingsButton);panel.append(footer,settings);modal.append(panel);document.body.append(modal);
     modal.addEventListener('close',()=>{closeCard();lastFocus?.focus?.();});
-    const opener=button('☾ Таро',open,'tf-launcher');opener.title='Витражи судьбы';(document.querySelector('#extensionsMenu') || document.querySelector('#extensions_settings') || document.body).append(opener);
-    const moon=button('☾',open,'tf-launcher tf-floating');moon.setAttribute('aria-label','Открыть Таро — Витражи судьбы');moon.title='Открыть Таро';document.body.append(moon);
-    function viewport(){ const v=window.visualViewport;modal.style.setProperty('--tf-height',`${v?.height||innerHeight}px`);modal.style.setProperty('--tf-top',`${v?.offsetTop||0}px`); }
+    const opener=el('button','list-group-item flex-container flexGap5 tf-menu-entry');opener.type='button';opener.append(icon('moon'),el('span','','Таро'));opener.addEventListener('click',open);opener.title='Витражи судьбы';(document.querySelector('#extensionsMenu') || document.querySelector('#extensions_settings') || document.body).append(opener);
+    const moon=button('',open,'tf-floating');moon.append(icon('moon'));moon.setAttribute('aria-label','Открыть Таро — Витражи судьбы');moon.title='Открыть Таро';document.body.append(moon);
+    function viewport(){
+        const v=window.visualViewport;
+        modal.style.setProperty('--tf-height',`${v?.height||innerHeight}px`);modal.style.setProperty('--tf-top',`${v?.offsetTop||0}px`);
+        // Anchor to the visible viewport, including the mobile keyboard and zoom.
+        moon.style.left=`${Math.max(8,(v?.offsetLeft||0)+(v?.width||innerWidth)-72)}px`;
+        moon.style.top=`${Math.max(8,(v?.offsetTop||0)+(v?.height||innerHeight)-156)}px`;
+    }
     window.visualViewport?.addEventListener('resize',viewport);window.visualViewport?.addEventListener('scroll',viewport);window.addEventListener('resize',viewport);viewport();
 }
 function init() {
     const c=ctx();
     if(!c.setExtensionPrompt || !c.saveMetadataDebounced || !c.eventSource || !c.getRequestHeaders || !globalThis.HTMLDialogElement)throw Error('Для таро нужна актуальная версия SillyTavern и браузер с поддержкой dialog.');
-    config=c.extensionSettings[KEY]=Object.assign({},defaults,c.extensionSettings[KEY]);mount();
+    const previous=c.extensionSettings[KEY] || {};
+    config=c.extensionSettings[KEY]=Object.fromEntries(Object.entries(defaults).map(([key,value])=>[key,previous[key] ?? value]));
+    c.saveSettingsDebounced();mount();
     loadArt().then(render).catch(()=>say('Своя колода недоступна; используется встроенная.',true));
     const events=c.eventTypes||c.event_types;
     const on=(name,fn)=>{if(events[name])c.eventSource.on(events[name],fn);};
