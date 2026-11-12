@@ -103,9 +103,8 @@ function renderDetail() {
     detail.querySelector('h2').tabIndex = -1;
     if (c.reading) {
         detail.append(el('p','tf-prophecy',c.reading.prediction));
-        detail.append(el('p','tf-help', 'Подтверждено '+c.facts.filter(f=>f.step>=0).length+' из '+c.reading.steps.length));
+        detail.append(el('h3','','Следы пророчества'));
         const list = el('ol','tf-track');
-        c.reading.steps.forEach((step,i)=>{if(!c.facts.some(f=>f.step===i))list.append(el('li','tf-unconfirmed',step));});
         for (const f of [...c.facts].sort((a,b)=>a.message-b.message || a.step-b.step)) {
             const li = el('li'); li.append(el('span','',f.summary));
             const proof = el('details'); proof.append(el('summary','',`Сообщение ${f.message+1}`),el('blockquote','',f.quote)); li.append(proof); list.append(li);
