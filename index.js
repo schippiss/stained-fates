@@ -1,4 +1,4 @@
-import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate } from './core.js';
+import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate, validateProphecy, completionOutcome, archiveCompleted } from './core.js';
 import { request, profiles } from './api.js';
 import { scanLore } from './lore.js';
 import { cardMeaning } from './meanings.js';
@@ -6,7 +6,7 @@ import { icon } from './icons.js';
 import { attachFloating } from './floating.js';
 
 const ctx = () => globalThis.SillyTavern.getContext();
-const defaults = { enabled: true, profileId: '', reversed: true, interval: 1, contextChars: 14000, floatingPosition: null };
+const defaults = { enabled: true, showFloating: true, profileId: '', reversed: true, interval: 1, contextChars: 14000, floatingPosition: null };
 let config, connected = false, busy = false, controller, epoch = 0, timer, generation = false;
 let modal, panel, grid, notice, detail, floating, selected = null, lastFocus, pendingCheck = false;
 const celebrating = new Set(), art = new Map();
@@ -37,7 +37,7 @@ function setEnabled() {
 }
 function say(text, error = false) { notice.textContent = text; notice.classList.toggle('tf-error', error); }
 function render() {
-    if (floating) floating.hidden = !config.enabled;
+    if (floating) floating.hidden = !config.enabled || !config.showFloating;
     const toggle = panel.querySelector('[data-enabled]');
     toggle.textContent = config.enabled ? 'Таро включено' : 'Таро выключено';
     toggle.setAttribute('aria-pressed', String(config.enabled));
@@ -54,6 +54,7 @@ function render() {
         const text = el('span','tf-card-caption'); text.append(el('strong','',NAMES[c.arcana]), el('small','',`${c.reversed ? 'Перевёрнутая · ' : ''}${label[status(c)]}`));
         b.append(img,text); b.setAttribute('aria-label',`${NAMES[c.arcana]}. ${label[status(c)]}. Открыть предсказание`); grid.append(b);
     }
+    renderArchive();
     if (selected) renderDetail();
 }
 function open() {
@@ -93,6 +94,7 @@ function renderDetail() {
             detail.append(el('p', 'tf-help', 'Карта уже выбрана. Осталось услышать её предсказание.'));
             const retry = button('Повторить трактовку', () => readCard(c.id), 'tf-primary');
             retry.disabled = busy || !config.enabled; detail.append(retry);
+            detail.append(button('Отменить карту',()=>removeCard(c.id),'tf-quiet'));
         }
         return;
     }
@@ -101,7 +103,9 @@ function renderDetail() {
     detail.querySelector('h2').tabIndex = -1;
     if (c.reading) {
         detail.append(el('p','tf-prophecy',c.reading.prediction));
+        detail.append(el('p','tf-help', 'Подтверждено '+c.facts.filter(f=>f.step>=0).length+' из '+c.reading.steps.length));
         const list = el('ol','tf-track');
+        c.reading.steps.forEach((step,i)=>{if(!c.facts.some(f=>f.step===i))list.append(el('li','tf-unconfirmed',step));});
         for (const f of [...c.facts].sort((a,b)=>a.message-b.message || a.step-b.step)) {
             const li = el('li'); li.append(el('span','',f.summary));
             const proof = el('details'); proof.append(el('summary','',`Сообщение ${f.message+1}`),el('blockquote','',f.quote)); li.append(proof); list.append(li);
@@ -165,7 +169,7 @@ async function readCard(id) {
             otherPredictions:s.cards.filter(x=>x.reading).map(x=>x.reading),
         }, controller.signal, 1400);
         if (epoch !== currentEpoch || chatKey() !== key) return;
-        card.reading = validateReading(parseJSON(result),true); s.cursor = Math.min(s.cursor,card.drawAt); save(); say('Предсказание готово. Нажми на карту, чтобы прочитать.');
+        card.reading = validateProphecy(parseJSON(result)); s.cursor = Math.min(s.cursor,card.drawAt); save(); say('Предсказание готово. Нажми на карту, чтобы прочитать.');
     } catch(e) { if (epoch === currentEpoch && e.name !== 'AbortError') say(e.message,true); }
     finally { busy = false; readingId = null; render(); if (pendingCheck) schedule(); }
 }
@@ -202,7 +206,7 @@ async function check(force = false) {
             for (const batch of segments) {
                 const result = await request(ctx(),config,MONITOR_PROMPT,{
                     worldLore,
-                    cards:cards.map(c=>({id:c.id,activation:c.reading.activation || 'choice',trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
+                    cards:cards.map(c=>({id:c.id,activation:c.reading.activation || 'choice',question:c.question,prediction:c.reading.prediction,event:c.reading.event,occasion:c.reading.occasion,trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
                     previous:ctx().chat.slice(Math.max(0,i-2),i).map(m=>({role:m.is_user?'player':'narrator',text:String(m.mes).slice(-1200)})),messages:batch,
                 },controller.signal,2200);
                 if (epoch !== currentEpoch || chatKey() !== key) return;
@@ -217,7 +221,7 @@ async function check(force = false) {
     finally { busy=false; render(); if(pendingCheck) schedule(); }
 }
 function queueCelebrations() {
-    if (!config.enabled || generation || document.hidden || celebrating.size) return;
+    if (!config.enabled || generation || document.hidden || modal.open || celebrating.size) return;
     for (const c of state()?.cards || []) {
         if(status(c)!=='complete' || selected===c.id || celebrating.has(c.id)) continue;
         celebrating.add(c.id);
@@ -226,16 +230,29 @@ function queueCelebrations() {
         const img = el('img'); img.src = asset(c.arcana); img.alt = NAMES[c.arcana]; if(c.reversed)img.className='tf-reversed';
         toast.append(img,el('strong','','Предсказание исполнено'),el('span','',NAMES[c.arcana]));
         toast.setAttribute('aria-label',`${NAMES[c.arcana]}: предсказание исполнено. Закрыть`);
-        (modal.open ? modal : document.body).append(toast);
+        document.body.append(toast);
+        toast.setAttribute('role','status');toast.append(el('span','tf-outcome',completionOutcome(c)));
+        const rect=document.querySelector('#chat')?.getBoundingClientRect();
+        if(rect && rect.width>0){toast.style.left=(rect.left+rect.width/2)+'px';toast.style.top=Math.max(12,rect.top+12)+'px';toast.style.maxWidth=Math.max(180,rect.width-24)+'px';}
         let done=false;
         function finish() {
             if(done)return; done=true; toast.remove(); celebrating.delete(c.id);
-            if(chatKey()===key && epoch===version && status(c)==='complete' && selected!==c.id) { const s=state(); s.cards=s.cards.filter(x=>x.id!==c.id); save(); render(); }
+            if(chatKey()===key && epoch===version && status(c)==='complete' && selected!==c.id) { const s=state(); archiveCompleted(s,c); save(); render(); }
             queueCelebrations();
         }
-        setTimeout(finish,4600);
+        setTimeout(finish,10000);
         break;
     }
+}
+function renderArchive() {
+    const host=panel.querySelector('.tf-archive');if(!host)return;
+    host.replaceChildren(el('summary','','Исполненные карты · '+(state()?.archive?.length || 0)));
+    for(const c of state()?.archive || []) {
+        const item=el('article','tf-archive-item'),img=el('img');img.src=asset(c.arcana);img.alt=NAMES[c.arcana];
+        const text=el('div');text.append(el('strong','',NAMES[c.arcana]),el('p','tf-question',c.question),el('p','',c.outcome));
+        const prophecy=el('details');prophecy.append(el('summary','','Предсказание'),el('p','',c.prediction));text.append(prophecy);item.append(img,text);host.append(item);
+    }
+    if(!state()?.archive?.length)host.append(el('p','tf-help','Здесь останутся последние 12 исполненных карт этого чата.'));
 }
 function field(form, title, type, value, name) {
     const wrap=el('label','tf-field'); wrap.append(el('span','',title)); const input=el('input'); input.type=type; input.name=name;
@@ -256,6 +273,8 @@ function settingsUI() {
     }
     refreshProfiles();select.addEventListener('focus',refreshProfiles);
     form.append(button('Обновить список профилей',()=>{refreshProfiles();render();},'tf-quiet'));
+    const showFloating=field(form,'Показывать плавающую кнопку','checkbox',config.showFloating,'showFloating');
+    showFloating.addEventListener('change',()=>{config.showFloating=showFloating.checked;ctx().saveSettingsDebounced();render();});
     const rev=field(form,'Разрешить перевёрнутые карты','checkbox',config.reversed,'reversed');
     const interval=field(form,'Проверка каждые N ответов (1 — сразу)','number',config.interval,'interval');interval.min='1';interval.max='10';
     const budget=field(form,'Объём чата за запрос, символов','number',config.contextChars,'budget');budget.min='4000';budget.max='32000';budget.step='1000';
@@ -269,8 +288,8 @@ function settingsUI() {
     form.addEventListener('submit',e=>{e.preventDefault();if(busy)return;try{capture();say('Профиль Таро сохранён.');schedule();}catch(e){say(e.message,true);}});
     form.append(button('Проверить подключение',async()=>{
         if(busy)return;if(!config.enabled){say('Включи Таро перед проверкой.');return;}
-        try{capture();busy=true;render();say('Проверяем подключение…');await request(ctx(),config,'Ответь одним словом: готово.',{},undefined,24);say('Подключение работает. Можно обратиться к картам.');}
-        catch(e){say(e.message,true);}finally{busy=false;render();}
+        try{capture();const version=epoch;controller=new AbortController();busy=true;render();say('Проверяем подключение…');await request(ctx(),config,'Ответь одним словом: готово.',{},controller.signal,24);if(version===epoch)say('Подключение работает. Можно обратиться к картам.');}
+        catch(e){if(e.name!=='AbortError')say(e.message,true);}finally{busy=false;render();if(pendingCheck)schedule();}
     },'tf-quiet'));
     form.append(el('p','tf-help','Проверки расходуют токены. Интервал больше 1 уменьшает частоту, но задерживает отметки. На каждом ходе рассказчик получает краткие условия карт.'));
     d.append(form);
@@ -326,10 +345,10 @@ function mount() {
     const settingsButton=button('Настройки',()=>{settings.open=!settings.open;},'tf-quiet');
     settingsButton.setAttribute('aria-expanded','false');
     settings.addEventListener('toggle',()=>{panel.classList.toggle('tf-show-settings',settings.open);settingsButton.replaceChildren(icon(settings.open?'back':'settings'),document.createTextNode(settings.open?'К раскладу':'Настройки'));settingsButton.setAttribute('aria-expanded',String(settings.open));});
-    footer.append(settingsButton);panel.append(footer,settings);modal.append(panel);document.body.append(modal);
+    footer.append(settingsButton);panel.append(footer,settings,el('details','tf-archive'));modal.append(panel);document.body.append(modal);
     modal.addEventListener('close',()=>{closeCard();lastFocus?.focus?.();});
     const opener=el('button','list-group-item flex-container flexGap5 tf-menu-entry');opener.type='button';opener.append(icon('moon'),el('span','','Таро'));opener.addEventListener('click',open);opener.title='Витражи судьбы';(document.querySelector('#extensionsMenu') || document.querySelector('#extensions_settings') || document.body).append(opener);
-    const moon=floating=button('',open,'tf-floating');moon.append(icon('moon'));moon.setAttribute('aria-label','Открыть Таро. Перетащи значок или перемести стрелками клавиатуры.');moon.title='Открыть Таро · перетащи, чтобы переместить';moon.hidden=!config.enabled;document.body.append(moon);
+    const moon=floating=button('',open,'tf-floating');moon.append(icon('moon'));moon.setAttribute('aria-label','Открыть Таро. Перетащи значок или перемести стрелками клавиатуры.');moon.title='Открыть Таро · перетащи, чтобы переместить';moon.hidden=!config.enabled || !config.showFloating;document.body.append(moon);
     const refreshFloating=attachFloating(moon,()=>config.floatingPosition,position=>{config.floatingPosition=position;ctx().saveSettingsDebounced();},()=>window.visualViewport || {width:innerWidth,height:innerHeight});
     function viewport(){
         const v=window.visualViewport;
@@ -348,13 +367,13 @@ function init() {
     const events=c.eventTypes||c.event_types;
     const on=(name,fn)=>{if(events[name])c.eventSource.on(events[name],fn);};
     on('CHAT_CHANGED',()=>{invalidate();pendingCheck=false;generation=false;celebrating.clear();document.querySelectorAll('.tf-completion').forEach(e=>e.remove());selected=null;detail.hidden=true;grid.hidden=false;panel.querySelector('.tf-compose').hidden=false;panel.querySelector('[data-question]').value=state()?.draft||'';if(state()){reconcile(state(),ctx().chat);save();}syncPrompt();render();say(connected?'Карты этого чата готовы.':'Наблюдение ждёт подключения API.');schedule();});
-    const changed=()=>{invalidate();const s=state();if(s){reconcile(s,ctx().chat);save();render();}schedule();};
+    const changed=()=>{if(generation){pendingCheck=true;return;}invalidate();const s=state();if(s){reconcile(s,ctx().chat);save();render();}schedule();};
     for(const name of ['MESSAGE_SENT','MESSAGE_EDITED','MESSAGE_UPDATED','MESSAGE_DELETED','MESSAGE_SWIPED'])on(name,changed);
     on('GENERATION_STARTED',(_type,_options,dryRun)=>{if(!dryRun){generation=true;controller?.abort();}syncPrompt();});
     on('GENERATION_AFTER_COMMANDS',(_type,_options,dryRun)=>{if(!dryRun){const s=state();if(s)reconcile(s,ctx().chat);syncPrompt();}});
     on('GENERATION_ENDED',()=>{generation=false;changed();});on('GENERATION_STOPPED',()=>{generation=false;changed();});
     on('CHARACTER_MESSAGE_RENDERED',()=>{if(!generation)changed();});
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)queueCelebrations();});
-    if(state()){reconcile(state(),c.chat);save();}syncPrompt();render();
+    if(state()){reconcile(state(),c.chat);save();}syncPrompt();render();schedule();
 }
 try { init(); } catch(e) { const message=el('p','tf-error',`Таро: ${e.message}`);(document.querySelector('#extensions_settings')||document.body).append(message); }

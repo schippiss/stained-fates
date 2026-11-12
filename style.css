@@ -138,3 +138,16 @@ body:has(.tf-modal[open]) > .tf-floating { visibility: hidden; }
 
 .tf-modal select { width: 100%; min-height: 46px; color-scheme: dark; }
 .tf-modal select option { background: #211014; color: #f2e8db; }
+
+/* Completion is visible over the RP chat; the archive stays inside Tarot. */
+.tf-completion { top: max(16px,env(safe-area-inset-top)); bottom: auto; z-index: 2147483001; width: min(460px,calc(100vw - 24px)); display: grid; grid-template-columns: 58px 1fr; gap: 4px 14px; text-align: left; padding: 14px 18px; background: linear-gradient(120deg,#361822,#1c141d); animation: tf-turn .4s ease both; cursor: pointer; }
+.tf-completion img { grid-column: 1; grid-row: 1 / 4; width: 58px; height: 88px; object-fit: cover; }
+.tf-completion strong,.tf-completion span { grid-column: 2; }
+.tf-completion .tf-outcome { max-height: 7em; overflow: auto; color: #e0d2c1; font-size: 12px; }
+.tf-archive { margin-top: 20px; padding: 16px; background: #1c1013ed; border-radius: 14px; color: #e0d2c1; }
+.tf-archive > summary { cursor: pointer; min-height: 36px; }
+.tf-archive-item { display: flex; gap: 14px; padding: 16px 0; border-top: 1px solid #bda47930; font-size: 13px; overflow-wrap: anywhere; }
+.tf-archive-item img { width: 52px; height: 80px; object-fit: cover; border-radius: 5px; }
+.tf-archive-item > div { min-width: 0; }
+.tf-show-settings > .tf-archive { display: none; }
+@media(prefers-reduced-motion: reduce) { .tf-completion { animation: none; } }
