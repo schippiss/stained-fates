@@ -1,4 +1,4 @@
-import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate, validateProphecy, completionOutcome, archiveCompleted } from './core.js';
+import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate, validateProphecy, completionOutcome, archiveCompleted, ADVICE_PROMPT, validateAdvice } from './core.js';
 import { request, profiles } from './api.js';
 import { scanLore } from './lore.js';
 import { cardMeaning } from './meanings.js';
@@ -51,7 +51,7 @@ function render() {
         if (!c) { const empty = button('', () => panel.querySelector('[data-question]').focus(), 'tf-empty'); empty.append(el('span','tf-star','✧'),el('span','','Возможное будущее')); empty.setAttribute('aria-label','Задать вопрос для новой карты'); grid.append(empty); continue; }
         const b = button('', () => openCard(c.id), 'tf-card'); b.dataset.id = c.id;
         const img = el('img'); img.src = asset(c.arcana); img.alt = ''; img.className = c.reversed ? 'tf-reversed' : ''; img.loading = 'lazy';
-        const text = el('span','tf-card-caption'); text.append(el('strong','',NAMES[c.arcana]), el('small','',`${c.reversed ? 'Перевёрнутая · ' : ''}${label[status(c)]}`));
+        const text = el('span','tf-card-caption'); text.append(el('strong','',NAMES[c.arcana]), el('small','',`${c.kind==='advice'?'Совет · ':''}${c.reversed ? 'Перевёрнутая · ' : ''}${label[status(c)]}`));
         b.append(img,text); b.setAttribute('aria-label',`${NAMES[c.arcana]}. ${label[status(c)]}. Открыть предсказание`); grid.append(b);
     }
     renderArchive();
@@ -103,13 +103,13 @@ function renderDetail() {
     detail.querySelector('h2').tabIndex = -1;
     if (c.reading) {
         detail.append(el('p','tf-prophecy',c.reading.prediction));
-        detail.append(el('h3','','Следы пророчества'));
+        detail.append(el('h3','',c.reading.kind==='advice'?'Отклик на совет':'Следы пророчества'));
         const list = el('ol','tf-track');
-        for (const f of [...c.facts].sort((a,b)=>a.message-b.message || a.step-b.step)) {
-            const li = el('li'); li.append(el('span','',f.summary));
+        for (const f of [...c.facts, ...(c.traces || []).map(t=>({...t,trace:true}))].sort((a,b)=>a.message-b.message || a.step-b.step)) {
+            const li = el('li',f.trace?'tf-trace':''); if(f.trace)li.append(el('small','tf-help','По пути к исполнению')); li.append(el('span','',f.summary));
             const proof = el('details'); proof.append(el('summary','',`Сообщение ${f.message+1}`),el('blockquote','',f.quote)); li.append(proof); list.append(li);
         }
-        if (!c.facts.length) list.append(el('li','tf-unconfirmed','Подтверждённых событий пока нет.'));
+        if (!c.facts.length && !c.traces?.length) list.append(el('li','tf-unconfirmed','Подтверждённых событий пока нет.'));
         detail.append(list);
         if (c.conflict) detail.append(el('p','tf-error',`Противоречие: ${c.conflict.summary}. Карта не будет завершена автоматически. Можно отменить её или исправить событие в чате.`));
     } else {
@@ -117,7 +117,7 @@ function renderDetail() {
         detail.append(button('Повторить трактовку',()=>readCard(c.id)));
     }
     const actions = el('div','tf-actions');
-    actions.append(button('Отменить предсказание',()=>{
+    actions.append(button(c.reading?.kind==='advice'?'Отменить совет':'Отменить предсказание',()=>{
         actions.replaceChildren(el('span','','Карта исчезнет и перестанет влиять на историю.'));
         actions.append(button('Да, отменить',()=>removeCard(c.id)),button('Оставить',renderDetail,'tf-quiet'));
     },'tf-danger tf-quiet'));
@@ -143,7 +143,7 @@ async function drawCard() {
     if (!config.enabled || !s || busy) return;
     if (!connected) { say('Сначала сохрани подключение в настройках.',true); return; }
     if (!question) { input.focus(); return; }
-    const c = { id:crypto.randomUUID(), ...draw(s.cards, config.reversed), question:question.slice(0,600), drawAt:ctx().chat.length, facts:[], reading:null, conflict:null };
+    const c = { kind:panel.querySelector('[name=readingMode]').value, id:crypto.randomUUID(), ...draw(s.cards, config.reversed), question:question.slice(0,600), drawAt:ctx().chat.length, facts:[], reading:null, conflict:null };
     s.cards.push(c); s.draft = ''; input.value = ''; save(); render(); openCard(c.id); await readCard(c.id);
 }
 async function readCard(id) {
@@ -152,7 +152,7 @@ async function readCard(id) {
     const currentEpoch = epoch, key = chatKey(); controller = new AbortController(); busy = true; readingId = id; render(); say('Читаем судьбу…');
     try {
         const c = ctx(), character = c.characters?.[c.characterId];
-        if (!card.fateDraft) {
+        if (card.kind !== 'advice' && !card.fateDraft) {
             const draft = await request(c,config,FATE_PROMPT,fateInput(card),controller.signal,800,{temperature:0.8});
             if (epoch !== currentEpoch || chatKey() !== key) return;
             card.fateDraft=validateFate(parseJSON(draft));save();
@@ -160,15 +160,16 @@ async function readCard(id) {
         const summary = [...c.chat].reverse().find(m => m.extra?.memory)?.extra.memory;
         const worldLore = await scanLore(c, contextWindow(c.chat), card.question);
         if (epoch !== currentEpoch || chatKey() !== key) return;
-        const result = await request(c, config, DRAW_PROMPT, {
+        const result = await request(c, config, card.kind==='advice'?ADVICE_PROMPT:DRAW_PROMPT, {
+            mode:card.kind || 'prophecy',
             worldLore, fate:card.fateDraft,
             card: NAMES[card.arcana], reversed:card.reversed, meaning:cardMeaning(card.arcana, card.reversed), question:card.question,
             characters: { player:c.name1, partner:c.name2, description:String(character?.description || '').slice(0,2500), scenario:String(character?.scenario || '').slice(0,1500) },
             summary: typeof summary === 'string' ? summary.slice(0,2500) : '', messages:contextWindow(c.chat),
             otherPredictions:s.cards.filter(x=>x.reading).map(x=>x.reading),
-        }, controller.signal, 1400);
+        }, controller.signal, 2800);
         if (epoch !== currentEpoch || chatKey() !== key) return;
-        card.reading = validateProphecy(parseJSON(result)); s.cursor = Math.min(s.cursor,card.drawAt); save(); say('Предсказание готово. Нажми на карту, чтобы прочитать.');
+        card.reading = card.kind==='advice'?validateAdvice(parseJSON(result)):validateProphecy(parseJSON(result)); s.cursor = Math.min(s.cursor,card.drawAt); save(); say('Предсказание готово. Нажми на карту, чтобы прочитать.');
     } catch(e) { if (epoch === currentEpoch && e.name !== 'AbortError') say(e.message,true); }
     finally { busy = false; readingId = null; render(); if (pendingCheck) schedule(); }
 }
@@ -185,6 +186,7 @@ async function check(force = false) {
     if (s.cursor >= chat.length) { queueCelebrations(); if(force) say('Новых событий для проверки нет.'); return; }
     if (!force && config.interval > 1 && chat.slice(s.cursor).filter(m=>!m.is_user&&!m.is_system).length < config.interval) return;
     const currentEpoch = epoch, key = chatKey(); controller = new AbortController(); busy = true; render(); say('Проверяем следы предсказаний…');
+    let added = 0, tracesAdded = 0;
     try {
         const worldLore = await scanLore(ctx(), contextWindow(ctx().chat));
         if (epoch !== currentEpoch || chatKey() !== key) return;
@@ -205,17 +207,19 @@ async function check(force = false) {
             for (const batch of segments) {
                 const result = await request(ctx(),config,MONITOR_PROMPT,{
                     worldLore,
-                    cards:cards.map(c=>({id:c.id,activation:c.reading.activation || 'choice',question:c.question,prediction:c.reading.prediction,event:c.reading.event,occasion:c.reading.occasion,trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
+                    cards:cards.map(c=>({id:c.id,kind:c.reading.kind || 'prophecy',knownTraces:c.traces || [],activation:c.reading.activation || 'choice',question:c.question,prediction:c.reading.prediction,event:c.reading.event,occasion:c.reading.occasion,trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
                     previous:ctx().chat.slice(Math.max(0,i-2),i).map(m=>({role:m.is_user?'player':'narrator',text:String(m.mes).slice(-1200)})),messages:batch,
                 },controller.signal,2200);
                 if (epoch !== currentEpoch || chatKey() !== key) return;
                 const copy = structuredClone(s);
-                applyUpdates(copy,parseJSON(result).updates,ctx().chat,new Set(batch.filter(x=>x.role!=='system').map(x=>x.message)));
-                for(const c of cards) { const update = copy.cards.find(x=>x.id===c.id); c.facts=update.facts; c.conflict=update.conflict; }
+                const report = applyUpdates(copy,parseJSON(result).updates,ctx().chat,new Set(batch.filter(x=>x.role!=='system').map(x=>x.message)));
+                if (report.rejected) throw Error('Модель прислала неподтверждённые отметки: проверь номера критериев, сообщений или точность цитат. Участок не помечен проверенным. Нажми «Проверить события» для повторной проверки.');
+                added += report.added; tracesAdded += report.traces;
+                for(const c of cards) { const update = copy.cards.find(x=>x.id===c.id); c.facts=update.facts; c.traces=update.traces; c.conflict=update.conflict; }
             }
             s.cursor = end; s.hashes = ctx().chat.map(fingerprint); save(); render();
         }
-        say('Наблюдение активно · все новые события проверены.'); queueCelebrations();
+        say(added || tracesAdded ? `Проверка завершена · подтверждений: ${added}, новых следов: ${tracesAdded}.` : 'Проверка завершена · модель не нашла новых подтверждений. Прежние отметки сохранены.'); queueCelebrations();
     } catch(e) { if(epoch === currentEpoch && e.name !== 'AbortError') say(`${e.message} Прогресс не потерян; проверку можно повторить.`,true); }
     finally { busy=false; render(); if(pendingCheck) schedule(); }
 }
@@ -227,7 +231,7 @@ function queueCelebrations() {
         const key = chatKey(), version = epoch;
         const toast = button('',()=>finish(),'tf-completion');
         const img = el('img'); img.src = asset(c.arcana); img.alt = NAMES[c.arcana]; if(c.reversed)img.className='tf-reversed';
-        toast.append(img,el('strong','','Предсказание исполнено'),el('span','',NAMES[c.arcana]));
+        toast.append(img,el('strong','',c.reading.kind==='advice'?'Совет нашёл отклик':'Предсказание исполнено'),el('span','',NAMES[c.arcana]));
         toast.setAttribute('aria-label',`${NAMES[c.arcana]}: предсказание исполнено. Закрыть`);
         document.body.append(toast);
         toast.setAttribute('role','status');toast.append(el('span','tf-outcome',completionOutcome(c)));
@@ -248,7 +252,7 @@ function renderArchive() {
     host.replaceChildren(el('summary','','Исполненные карты · '+(state()?.archive?.length || 0)));
     for(const c of state()?.archive || []) {
         const item=el('article','tf-archive-item'),img=el('img');img.src=asset(c.arcana);img.alt=NAMES[c.arcana];
-        const text=el('div');text.append(el('strong','',NAMES[c.arcana]),el('p','tf-question',c.question),el('p','',c.outcome));
+        const text=el('div');text.append(el('strong','',(c.kind==='advice'?'Совет · ':'')+NAMES[c.arcana]),el('p','tf-question',c.question),el('p','',c.outcome));
         const prophecy=el('details');prophecy.append(el('summary','','Предсказание'),el('p','',c.prediction));text.append(prophecy);item.append(img,text);host.append(item);
     }
     if(!state()?.archive?.length)host.append(el('p','tf-help','Здесь останутся последние 12 исполненных карт этого чата.'));
@@ -336,7 +340,14 @@ function mount() {
     const toolbar=el('div','tf-toolbar'),toggle=button('',setEnabled,'tf-toggle');toggle.dataset.enabled='';
     toolbar.append(toggle,el('span','tf-help','Свой расклад в каждом чате'));panel.append(toolbar);
     grid=el('div','tf-grid');panel.append(grid);detail=el('article','tf-detail');detail.hidden=true;panel.append(detail);
-    const compose=el('form','tf-compose');const question=el('textarea');question.dataset.question='';question.id='tf-question';const questionLabel=el('label','tf-compose-label','Твой вопрос картам');questionLabel.htmlFor=question.id;compose.append(questionLabel);question.placeholder='К чему приведёт мой выбор?';question.maxLength=600;question.rows=2;question.addEventListener('input',()=>{const s=state();if(s){s.draft=question.value;save();}});compose.append(question);
+    const compose=el('form','tf-compose');
+    const modeLabel=el('label','tf-field');modeLabel.append(el('span','','К чему обратиться'));
+    const mode=el('select');mode.name='readingMode';
+    for(const [value,title] of [['prophecy','Предсказание'],['advice','Совет от карт']]){const option=el('option','',title);option.value=value;mode.append(option);}
+    modeLabel.append(mode);compose.append(modeLabel);
+    const modeHelp=el('p','tf-help','Карта предскажет событие, которое вплетётся в историю.');compose.append(modeHelp);
+    mode.addEventListener('change',()=>{modeHelp.textContent=mode.value==='advice'?'Задай вопрос. Совет даст идею для действия и небольшой приятный отклик в РП.':'Карта предскажет событие, которое вплетётся в историю.';});
+    const question=el('textarea');question.dataset.question='';question.id='tf-question';const questionLabel=el('label','tf-compose-label','Твой вопрос картам');questionLabel.htmlFor=question.id;compose.append(questionLabel);question.placeholder='К чему приведёт мой выбор?';question.maxLength=600;question.rows=2;question.addEventListener('input',()=>{const s=state();if(s){s.draft=question.value;save();}});compose.append(question);
     const drawButton=el('button','tf-button tf-primary','Вытянуть карту');drawButton.prepend(icon('cards'));drawButton.type='submit';drawButton.dataset.draw='';compose.append(drawButton);compose.addEventListener('submit',e=>{e.preventDefault();drawCard().catch(e=>say(e.message,true));});panel.append(compose);
     notice=el('p','tf-notice');notice.setAttribute('role','status');notice.setAttribute('aria-live','polite');panel.append(notice);
     const footer=el('div','tf-footer');footer.append(button('Проверить события',()=>check(true),'tf-quiet'));

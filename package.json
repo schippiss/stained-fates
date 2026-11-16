@@ -1,9 +1,9 @@
 {
   "name": "st-stained-fates",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-isolation=none tests/core.test.js tests/security.test.js tests/lore.test.js tests/profiles.test.js tests/fate.test.js tests/floating.test.js"
+    "test": "node --test --test-isolation=none tests/core.test.js tests/security.test.js tests/lore.test.js tests/profiles.test.js tests/fate.test.js tests/floating.test.js tests/advice.test.js"
   }
 }

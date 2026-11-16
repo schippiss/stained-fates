@@ -151,3 +151,6 @@ body:has(.tf-modal[open]) > .tf-floating { visibility: hidden; }
 .tf-archive-item > div { min-width: 0; }
 .tf-show-settings > .tf-archive { display: none; }
 @media(prefers-reduced-motion: reduce) { .tf-completion { animation: none; } }
+
+.tf-track .tf-trace > small { display: block; margin-bottom: 4px; }
+.tf-track .tf-trace::before { background: #a39ab8; }
