@@ -1,4 +1,4 @@
-import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate, validateProphecy, completionOutcome, archiveCompleted, ADVICE_PROMPT, validateAdvice } from './core.js';
+import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate, validateProphecy, completionOutcome, archiveCompleted, ADVICE_PROMPT, validateAdvice, dismissEvidence } from './core.js';
 import { request, profiles } from './api.js';
 import { scanLore } from './lore.js';
 import { cardMeaning } from './meanings.js';
@@ -106,7 +106,14 @@ function renderDetail() {
         detail.append(el('h3','',c.reading.kind==='advice'?'Отклик на совет':'Следы пророчества'));
         const list = el('ol','tf-track');
         for (const f of [...c.facts, ...(c.traces || []).map(t=>({...t,trace:true}))].sort((a,b)=>a.message-b.message || a.step-b.step)) {
-            const li = el('li',f.trace?'tf-trace':''); if(f.trace)li.append(el('small','tf-help','По пути к исполнению')); li.append(el('span','',f.summary));
+            const li = el('li',f.trace?'tf-trace':'');
+            const remove=button('✕',()=>{
+                const before=structuredClone({facts:c.facts,traces:c.traces || [],dismissed:c.dismissed || []}),key=chatKey();
+                invalidate();dismissEvidence(c,f);save();render();
+                say('Запись убрана. Повторная проверка не вернёт её из того же сообщения.');
+                notice.append(button('Вернуть',()=>{if(chatKey()!==key || !state()?.cards.includes(c))return;invalidate();Object.assign(c,before);reconcile(state(),ctx().chat);save();render();say('Запись восстановлена.');},'tf-quiet'));
+            },'tf-remove-evidence');
+            remove.title='Убрать эту трактовку';remove.setAttribute('aria-label','Убрать трактовку: '+f.summary);li.append(remove); if(f.trace)li.append(el('small','tf-help','По пути к исполнению')); li.append(el('span','',f.summary));
             const proof = el('details'); proof.append(el('summary','',`Сообщение ${f.message+1}`),el('blockquote','',f.quote)); li.append(proof); list.append(li);
         }
         if (!c.facts.length && !c.traces?.length) list.append(el('li','tf-unconfirmed','Подтверждённых событий пока нет.'));
@@ -207,15 +214,21 @@ async function check(force = false) {
             for (const batch of segments) {
                 const result = await request(ctx(),config,MONITOR_PROMPT,{
                     worldLore,
-                    cards:cards.map(c=>({id:c.id,kind:c.reading.kind || 'prophecy',knownTraces:c.traces || [],activation:c.reading.activation || 'choice',question:c.question,prediction:c.reading.prediction,event:c.reading.event,occasion:c.reading.occasion,trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
+                    cards:cards.map(c=>({id:c.id,kind:c.reading.kind || 'prophecy',knownTraces:c.traces || [],dismissed:c.dismissed || [],activation:c.reading.activation || 'choice',question:c.question,prediction:c.reading.prediction,event:c.reading.event,occasion:c.reading.occasion,trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
                     previous:ctx().chat.slice(Math.max(0,i-2),i).map(m=>({role:m.is_user?'player':'narrator',text:String(m.mes).slice(-1200)})),messages:batch,
                 },controller.signal,2200);
                 if (epoch !== currentEpoch || chatKey() !== key) return;
                 const copy = structuredClone(s);
                 const report = applyUpdates(copy,parseJSON(result).updates,ctx().chat,new Set(batch.filter(x=>x.role!=='system').map(x=>x.message)));
-                if (report.rejected) throw Error('Модель прислала неподтверждённые отметки: проверь номера критериев, сообщений или точность цитат. Участок не помечен проверенным. Нажми «Проверить события» для повторной проверки.');
                 added += report.added; tracesAdded += report.traces;
                 for(const c of cards) { const update = copy.cards.find(x=>x.id===c.id); c.facts=update.facts; c.traces=update.traces; c.conflict=update.conflict; }
+                // Keep valid results even when the same response contains bad evidence.
+                // Leave this fragment's cursor unchanged so it can be retried safely.
+                save(); render();
+                if(report.rejected){
+                    say(`Проверка частичная. Сохранено подтверждений: ${added}, следов: ${tracesAdded}. Не приняты отметки модели: ${report.rejected} (${report.reasons.join('; ')}). Уже найденное сохранено; этот фрагмент можно проверить повторно.`,true);
+                    return;
+                }
             }
             s.cursor = end; s.hashes = ctx().chat.map(fingerprint); save(); render();
         }
@@ -341,12 +354,14 @@ function mount() {
     toolbar.append(toggle,el('span','tf-help','Свой расклад в каждом чате'));panel.append(toolbar);
     grid=el('div','tf-grid');panel.append(grid);detail=el('article','tf-detail');detail.hidden=true;panel.append(detail);
     const compose=el('form','tf-compose');
-    const modeLabel=el('label','tf-field');modeLabel.append(el('span','','К чему обратиться'));
-    const mode=el('select');mode.name='readingMode';
-    for(const [value,title] of [['prophecy','Предсказание'],['advice','Совет от карт']]){const option=el('option','',title);option.value=value;mode.append(option);}
-    modeLabel.append(mode);compose.append(modeLabel);
-    const modeHelp=el('p','tf-help','Карта предскажет событие, которое вплетётся в историю.');compose.append(modeHelp);
-    mode.addEventListener('change',()=>{modeHelp.textContent=mode.value==='advice'?'Задай вопрос. Совет даст идею для действия и небольшой приятный отклик в РП.':'Карта предскажет событие, которое вплетётся в историю.';});
+    const modes=el('div','tf-reading-modes');modes.setAttribute('role','group');modes.setAttribute('aria-label','Режим карты');
+    const mode=el('input');mode.type='hidden';mode.name='readingMode';mode.value='prophecy';compose.append(mode);
+    const refreshMode=()=>{for(const b of modes.children)b.setAttribute('aria-pressed',String(b.dataset.mode===mode.value));};
+    for(const [value,title] of [['prophecy','Предсказание'],['advice','Совет']]){
+        const b=button(title,()=>{mode.value=value;refreshMode();},'tf-mode');b.dataset.mode=value;
+        b.title=value==='advice'?'Идея для действия и небольшой отклик в РП':'Будущее событие в вашей истории';modes.append(b);
+    }
+    mode.addEventListener('change',refreshMode);refreshMode();compose.append(modes);
     const question=el('textarea');question.dataset.question='';question.id='tf-question';const questionLabel=el('label','tf-compose-label','Твой вопрос картам');questionLabel.htmlFor=question.id;compose.append(questionLabel);question.placeholder='К чему приведёт мой выбор?';question.maxLength=600;question.rows=2;question.addEventListener('input',()=>{const s=state();if(s){s.draft=question.value;save();}});compose.append(question);
     const drawButton=el('button','tf-button tf-primary','Вытянуть карту');drawButton.prepend(icon('cards'));drawButton.type='submit';drawButton.dataset.draw='';compose.append(drawButton);compose.addEventListener('submit',e=>{e.preventDefault();drawCard().catch(e=>say(e.message,true));});panel.append(compose);
     notice=el('p','tf-notice');notice.setAttribute('role','status');notice.setAttribute('aria-live','polite');panel.append(notice);

@@ -154,3 +154,11 @@ body:has(.tf-modal[open]) > .tf-floating { visibility: hidden; }
 
 .tf-track .tf-trace > small { display: block; margin-bottom: 4px; }
 .tf-track .tf-trace::before { background: #a39ab8; }
+
+.tf-reading-modes { display: flex; gap: 6px; margin: 0 0 16px; }
+.tf-reading-modes .tf-mode { min-height: 38px; padding: 7px 13px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--tf-muted); font-size: 13px; box-shadow: none; }
+.tf-reading-modes .tf-mode[aria-pressed=true] { background: #dbbf8310; border-color: #bda47935; color: var(--tf-gold); }
+.tf-track li:has(.tf-remove-evidence) { padding-right: 32px; }
+.tf-track .tf-remove-evidence { position: absolute; right: -8px; top: -6px; display: grid; place-items: center; width: 36px; height: 36px; min-height: 36px; padding: 8px; border: 0; background: transparent; box-shadow: none; color: #b9a8b2; opacity: .65; }
+.tf-track .tf-remove-evidence:hover,.tf-track .tf-remove-evidence:focus-visible { opacity: 1; background: #ffffff09; }
+.tf-track .tf-remove-evidence .tf-icon { width: 14px; height: 14px; margin: 0; }
