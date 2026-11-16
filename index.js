@@ -114,7 +114,7 @@ function renderDetail() {
                 notice.append(button('Вернуть',()=>{if(chatKey()!==key || !state()?.cards.includes(c))return;invalidate();Object.assign(c,before);reconcile(state(),ctx().chat);save();render();say('Запись восстановлена.');},'tf-quiet'));
             },'tf-remove-evidence');
             remove.title='Убрать эту трактовку';remove.setAttribute('aria-label','Убрать трактовку: '+f.summary);li.append(remove); if(f.trace)li.append(el('small','tf-help','По пути к исполнению')); li.append(el('span','',f.summary));
-            const proof = el('details'); proof.append(el('summary','',`Сообщение ${f.message+1}`),el('blockquote','',f.quote)); li.append(proof); list.append(li);
+            const proof = el('details'); proof.append(el('summary','',`Сообщение ${f.message+1}`),el('blockquote','',f.quote || String(ctx().chat[f.message]?.mes || '').slice(0,1200))); li.append(proof); list.append(li);
         }
         if (!c.facts.length && !c.traces?.length) list.append(el('li','tf-unconfirmed','Подтверждённых событий пока нет.'));
         detail.append(list);
@@ -219,7 +219,7 @@ async function check(force = false) {
                 },controller.signal,2200);
                 if (epoch !== currentEpoch || chatKey() !== key) return;
                 const copy = structuredClone(s);
-                const report = applyUpdates(copy,parseJSON(result).updates,ctx().chat,new Set(batch.filter(x=>x.role!=='system').map(x=>x.message)));
+                const report = applyUpdates(copy,parseJSON(result).updates,ctx().chat,new Set(batch.filter(x=>x.role!=='system').map(x=>x.message)),{semanticEvidence:true});
                 added += report.added; tracesAdded += report.traces;
                 for(const c of cards) { const update = copy.cards.find(x=>x.id===c.id); c.facts=update.facts; c.traces=update.traces; c.conflict=update.conflict; }
                 // Keep valid results even when the same response contains bad evidence.
