@@ -1,4 +1,4 @@
-import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate, validateProphecy, completionOutcome, archiveCompleted, ADVICE_PROMPT, validateAdvice, dismissEvidence } from './core.js';
+import { KEY, NAMES, ROMAN, draw, fingerprint, parseJSON, validateReading, reconcile, status, applyUpdates, influence, DRAW_PROMPT, MONITOR_PROMPT, FATE_PROMPT, fateInput, validateFate, validateProphecy, completionOutcome, archiveCompleted, ADVICE_PROMPT, validateAdvice, dismissEvidence, brief, monitorCard } from './core.js';
 import { request, profiles } from './api.js';
 import { scanLore } from './lore.js';
 import { cardMeaning } from './meanings.js';
@@ -6,7 +6,7 @@ import { icon } from './icons.js';
 import { attachFloating } from './floating.js';
 
 const ctx = () => globalThis.SillyTavern.getContext();
-const defaults = { enabled: true, showFloating: true, profileId: '', reversed: true, interval: 1, contextChars: 14000, floatingPosition: null };
+const defaults = { enabled: true, showFloating: true, profileId: '', reversed: true, interval: 1, contextChars: 14000, floatingPosition: null, panelColor:'#211014', buttonColor:'#c8aa70', floatingColor:'#521e2c', floatingTheme:false };
 let config, connected = false, busy = false, controller, epoch = 0, timer, generation = false;
 let modal, panel, grid, notice, detail, floating, selected = null, lastFocus, pendingCheck = false;
 const celebrating = new Set(), art = new Map();
@@ -35,8 +35,10 @@ function setEnabled() {
     say(config.enabled ? 'Таро включено. Карты продолжают свою историю.' : 'Таро выключено. Карты сохранены; запросы и влияние на историю остановлены.');
     if (config.enabled) schedule();
 }
+const cardLabel=c=>c.reading?.kind==='advice' && status(c)==='waiting'?'Ждёт действия':label[status(c)];
 function say(text, error = false) { notice.textContent = text; notice.classList.toggle('tf-error', error); }
 function render() {
+    applyColors();
     if (floating) floating.hidden = !config.enabled || !config.showFloating;
     const toggle = panel.querySelector('[data-enabled]');
     toggle.textContent = config.enabled ? 'Таро включено' : 'Таро выключено';
@@ -51,8 +53,8 @@ function render() {
         if (!c) { const empty = button('', () => panel.querySelector('[data-question]').focus(), 'tf-empty'); empty.append(el('span','tf-star','✧'),el('span','','Возможное будущее')); empty.setAttribute('aria-label','Задать вопрос для новой карты'); grid.append(empty); continue; }
         const b = button('', () => openCard(c.id), 'tf-card'); b.dataset.id = c.id;
         const img = el('img'); img.src = asset(c.arcana); img.alt = ''; img.className = c.reversed ? 'tf-reversed' : ''; img.loading = 'lazy';
-        const text = el('span','tf-card-caption'); text.append(el('strong','',NAMES[c.arcana]), el('small','',`${c.kind==='advice'?'Совет · ':''}${c.reversed ? 'Перевёрнутая · ' : ''}${label[status(c)]}`));
-        b.append(img,text); b.setAttribute('aria-label',`${NAMES[c.arcana]}. ${label[status(c)]}. Открыть предсказание`); grid.append(b);
+        const text = el('span','tf-card-caption'); text.append(el('strong','',NAMES[c.arcana]), el('small','',`${c.kind==='advice'?'Совет · ':''}${c.reversed ? 'Перевёрнутая · ' : ''}${cardLabel(c)}`));
+        b.append(img,text); b.setAttribute('aria-label',`${NAMES[c.arcana]}. ${cardLabel(c)}. Открыть предсказание`); grid.append(b);
     }
     renderArchive();
     if (selected) renderDetail();
@@ -98,7 +100,7 @@ function renderDetail() {
         }
         return;
     }
-    detail.append(el('div','tf-eyebrow',`${ROMAN[c.arcana]} · ${c.reversed ? 'Перевёрнутая' : 'Прямая'}`),el('h2','',NAMES[c.arcana]),el('span','tf-status',label[status(c)]));
+    detail.append(el('div','tf-eyebrow',`${ROMAN[c.arcana]} · ${c.reversed ? 'Перевёрнутая' : 'Прямая'}`),el('h2','',NAMES[c.arcana]),el('span','tf-status',cardLabel(c)));
     detail.append(el('p','tf-question',c.question));
     detail.querySelector('h2').tabIndex = -1;
     if (c.reading) {
@@ -113,8 +115,8 @@ function renderDetail() {
                 say('Запись убрана. Повторная проверка не вернёт её из того же сообщения.');
                 notice.append(button('Вернуть',()=>{if(chatKey()!==key || !state()?.cards.includes(c))return;invalidate();Object.assign(c,before);reconcile(state(),ctx().chat);save();render();say('Запись восстановлена.');},'tf-quiet'));
             },'tf-remove-evidence');
-            remove.title='Убрать эту трактовку';remove.setAttribute('aria-label','Убрать трактовку: '+f.summary);li.append(remove); if(f.trace)li.append(el('small','tf-help','По пути к исполнению')); li.append(el('span','',f.summary));
-            const proof = el('details'); proof.append(el('summary','',`Сообщение ${f.message+1}`),el('blockquote','',f.quote || String(ctx().chat[f.message]?.mes || '').slice(0,1200))); li.append(proof); list.append(li);
+            remove.title='Убрать эту трактовку';remove.setAttribute('aria-label','Убрать трактовку: '+f.summary);li.append(remove); if(f.trace)li.append(el('small','tf-help','По пути к исполнению')); li.append(el('span','',brief(f.summary)));
+            list.append(li);
         }
         if (!c.facts.length && !c.traces?.length) list.append(el('li','tf-unconfirmed','Подтверждённых событий пока нет.'));
         detail.append(list);
@@ -195,7 +197,6 @@ async function check(force = false) {
     const currentEpoch = epoch, key = chatKey(); controller = new AbortController(); busy = true; render(); say('Проверяем следы предсказаний…');
     let added = 0, tracesAdded = 0;
     try {
-        const worldLore = await scanLore(ctx(), contextWindow(ctx().chat));
         if (epoch !== currentEpoch || chatKey() !== key) return;
         // Batches preserve all text: oversized messages are split into overlapping segments.
         // The cursor advances only after every segment of the message has been checked.
@@ -213,15 +214,14 @@ async function check(force = false) {
                 ? Array.from({length:Math.ceil(messages[0].text.length/(config.contextChars-400))},(_,j)=>[{...messages[0],text:messages[0].text.slice(j*(config.contextChars-400),j*(config.contextChars-400)+config.contextChars),partial:true}]) : [messages];
             for (const batch of segments) {
                 const result = await request(ctx(),config,MONITOR_PROMPT,{
-                    worldLore,
-                    cards:cards.map(c=>({id:c.id,kind:c.reading.kind || 'prophecy',knownTraces:c.traces || [],dismissed:c.dismissed || [],activation:c.reading.activation || 'choice',question:c.question,prediction:c.reading.prediction,event:c.reading.event,occasion:c.reading.occasion,trigger:c.reading.trigger,steps:c.reading.steps,confirmed:c.facts,conflict:c.conflict})),
+                    cards:cards.map(monitorCard),
                     previous:ctx().chat.slice(Math.max(0,i-2),i).map(m=>({role:m.is_user?'player':'narrator',text:String(m.mes).slice(-1200)})),messages:batch,
                 },controller.signal,2200);
                 if (epoch !== currentEpoch || chatKey() !== key) return;
                 const copy = structuredClone(s);
                 const report = applyUpdates(copy,parseJSON(result).updates,ctx().chat,new Set(batch.filter(x=>x.role!=='system').map(x=>x.message)),{semanticEvidence:true});
                 added += report.added; tracesAdded += report.traces;
-                for(const c of cards) { const update = copy.cards.find(x=>x.id===c.id); c.facts=update.facts; c.traces=update.traces; c.conflict=update.conflict; }
+                for(const c of cards) { const update = copy.cards.find(x=>x.id===c.id); c.facts=update.facts; c.traces=update.traces; c.conflict=update.conflict; c.outcome=update.outcome; }
                 // Keep valid results even when the same response contains bad evidence.
                 // Leave this fragment's cursor unchanged so it can be retried safely.
                 save(); render();
@@ -274,6 +274,16 @@ function field(form, title, type, value, name) {
     const wrap=el('label','tf-field'); wrap.append(el('span','',title)); const input=el('input'); input.type=type; input.name=name;
     if(type==='checkbox')input.checked=value; else input.value=value; wrap.append(input); form.append(wrap); return input;
 }
+function applyColors() {
+    if(!modal)return;
+    const color=(key)=>/^#[0-9a-f]{6}$/i.test(config[key])?config[key]:defaults[key];
+    const contrast=hex=>{const n=parseInt(hex.slice(1),16);return (((n>>16)*299+((n>>8)&255)*587+(n&255)*114)/1000)>150?'#241416':'#fff3e1';};
+    const bg=color('panelColor'),accent=color('buttonColor');
+    modal.style.setProperty('--tf-custom-bg',bg);modal.style.setProperty('--tf-custom-button',accent);modal.style.setProperty('--tf-button-ink',contrast(accent));
+    modal.style.setProperty('--tf-custom-ink',contrast(bg));
+    modal.classList.toggle('tf-custom-colors',bg!==defaults.panelColor);
+    if(floating){floating.style.setProperty('--tf-floating-bg',color('floatingColor'));floating.style.setProperty('--tf-floating-ink',color('floatingColor')===defaults.floatingColor?'#e1c68d':contrast(color('floatingColor')));floating.classList.toggle('tf-theme-floating',!!config.floatingTheme);}
+}
 function settingsUI() {
     const d=el('details','tf-settings'); d.append(el('summary','','Настройки'));
     const form=el('form');
@@ -291,6 +301,15 @@ function settingsUI() {
     form.append(button('Обновить список профилей',()=>{refreshProfiles();render();},'tf-quiet'));
     const showFloating=field(form,'Показывать плавающую кнопку','checkbox',config.showFloating,'showFloating');
     showFloating.addEventListener('change',()=>{config.showFloating=showFloating.checked;ctx().saveSettingsDebounced();render();});
+    const colors=el('details','tf-color-settings');colors.append(el('summary','','Цвета оформления'));form.append(colors);
+    const colorInputs=[];
+    for(const [key,title] of [['panelColor','Фон панели'],['buttonColor','Акцент кнопок'],['floatingColor','Плавающая кнопка']]){
+        const input=field(colors,title,'color',/^#[0-9a-f]{6}$/i.test(config[key])?config[key]:defaults[key],key);colorInputs.push(input);
+        input.addEventListener('input',()=>{config[key]=input.value;applyColors();ctx().saveSettingsDebounced();});
+    }
+    const theme=field(colors,'Плавающая кнопка в цветах темы SillyTavern','checkbox',config.floatingTheme,'floatingTheme');
+    theme.addEventListener('change',()=>{config.floatingTheme=theme.checked;applyColors();ctx().saveSettingsDebounced();});
+    colors.append(button('Исходные цвета',()=>{for(const input of colorInputs){config[input.name]=defaults[input.name];input.value=config[input.name];}config.floatingTheme=false;theme.checked=false;applyColors();ctx().saveSettingsDebounced();},'tf-quiet'));
     const rev=field(form,'Разрешить перевёрнутые карты','checkbox',config.reversed,'reversed');
     const interval=field(form,'Проверка каждые N ответов (1 — сразу)','number',config.interval,'interval');interval.min='1';interval.max='10';
     const budget=field(form,'Объём чата за запрос, символов','number',config.contextChars,'budget');budget.min='4000';budget.max='32000';budget.step='1000';

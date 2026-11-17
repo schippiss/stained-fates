@@ -162,3 +162,22 @@ body:has(.tf-modal[open]) > .tf-floating { visibility: hidden; }
 .tf-track .tf-remove-evidence { position: absolute; right: -8px; top: -6px; display: grid; place-items: center; width: 36px; height: 36px; min-height: 36px; padding: 8px; border: 0; background: transparent; box-shadow: none; color: #b9a8b2; opacity: .65; }
 .tf-track .tf-remove-evidence:hover,.tf-track .tf-remove-evidence:focus-visible { opacity: 1; background: #ffffff09; }
 .tf-track .tf-remove-evidence .tf-icon { width: 14px; height: 14px; margin: 0; }
+
+/* Optional palette; defaults retain the original stained-glass appearance. */
+.tf-modal { --tf-gold: var(--tf-custom-button,#c8aa70); }
+.tf-modal .tf-primary { background: var(--tf-custom-button,#c8aa70); color: var(--tf-button-ink,#241416); }
+.tf-modal .tf-primary:hover { filter: brightness(1.08); }
+.tf-modal .tf-toggle[aria-pressed=true]::before { background: var(--tf-custom-button,#c8aa70); }
+.tf-modal .tf-button:not(.tf-card):not(.tf-reveal):not(.tf-empty):not(.tf-remove-evidence):not(.tf-mode):not(.tf-quiet):not(.tf-primary) { background: color-mix(in srgb,var(--tf-custom-button,#c8aa70) 18%,transparent); }
+.tf-modal.tf-custom-colors { background: url('./assets/celestial-corners.svg') center top / 100% auto no-repeat,var(--tf-custom-bg); color: var(--tf-custom-ink); --tf-ink: var(--tf-custom-ink); --tf-muted: var(--tf-custom-ink); }
+.tf-custom-colors :is(.tf-compose,.tf-settings,.tf-detail,.tf-footer,.tf-archive) { background: color-mix(in srgb,var(--tf-custom-bg) 94%,var(--tf-custom-ink) 6%); }
+.tf-custom-colors :is(h1,h2,h3,.tf-prophecy,.tf-field,.tf-card-caption strong,.tf-quiet,textarea,input,select,.tf-compose-label,.tf-eyebrow) { color: var(--tf-custom-ink); }
+body > .tf-floating { background: var(--tf-floating-bg,#521e2c); color: var(--tf-floating-ink,#e1c68d); }
+body > .tf-floating:hover { background: var(--tf-floating-bg,#521e2c); filter: brightness(1.12); }
+body > .tf-floating.tf-theme-floating { background: var(--SmartThemeBlurTintColor,var(--tf-floating-bg)); color: var(--SmartThemeBodyColor,var(--tf-floating-ink)); }
+.tf-color-settings { flex-basis: 100%; margin: 8px 0; }
+.tf-color-settings > summary { cursor: pointer; min-height: 36px; }
+.tf-color-settings .tf-field:has(input[type=color]) { flex-direction: row; align-items: center; justify-content: space-between; }
+.tf-color-settings input[type=color] { width: 56px; height: 38px; padding: 4px; cursor: pointer; }
+
+.tf-custom-colors .tf-track .tf-remove-evidence { color: var(--tf-custom-ink); }
